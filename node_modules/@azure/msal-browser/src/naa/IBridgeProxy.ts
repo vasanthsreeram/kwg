@@ -3,25 +3,14 @@
  * Licensed under the MIT License.
  */
 
-import { AccountInfo } from "./AccountInfo";
-import {
-    AccountByHomeIdRequest,
-    AccountByLocalIdRequest,
-    AccountByUsernameRequest,
-} from "./AccountRequests";
-import { BridgeCapabilities } from "./BridgeCapabilities";
-import { TokenRequest } from "./TokenRequest";
-import { TokenResponse } from "./TokenResponse";
+import { AuthResult } from "./AuthResult.js";
+import { AccountContext } from "./BridgeAccountContext.js";
+import { BridgeCapabilities } from "./BridgeCapabilities.js";
+import { TokenRequest } from "./TokenRequest.js";
 
 export interface IBridgeProxy {
-    getTokenInteractive(request: TokenRequest): Promise<TokenResponse>;
-    getTokenSilent(request: TokenRequest): Promise<TokenResponse>;
-    getAccountInfo(
-        request:
-            | AccountByHomeIdRequest
-            | AccountByLocalIdRequest
-            | AccountByUsernameRequest
-    ): Promise<AccountInfo>;
-    getActiveAccount(): Promise<AccountInfo>;
+    getTokenInteractive(request: TokenRequest): Promise<AuthResult>;
+    getTokenSilent(request: TokenRequest): Promise<AuthResult>;
     getHostCapabilities(): BridgeCapabilities | null;
+    getAccountContext(): AccountContext | null;
 }

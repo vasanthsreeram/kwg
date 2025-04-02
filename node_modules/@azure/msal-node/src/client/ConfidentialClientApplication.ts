@@ -12,6 +12,7 @@ import {
     Constants as NodeConstants,
     ApiId,
     REGION_ENVIRONMENT_VARIABLE,
+    MSAL_FORCE_REGION,
 } from "../utils/Constants.js";
 import {
     CommonClientCredentialRequest,
@@ -19,14 +20,16 @@ import {
     AuthenticationResult,
     AzureRegionConfiguration,
     AuthError,
-    Constants,
     IAppTokenProvider,
     OIDC_DEFAULT_SCOPES,
     UrlString,
     AADAuthorityConstants,
     createClientAuthError,
     ClientAuthErrorCodes,
-} from "@azure/msal-common";
+    ClientAssertion as ClientAssertionType,
+    getClientAssertion,
+    AzureRegion,
+} from "@azure/msal-common/node";
 import { IConfidentialClientApplication } from "./IConfidentialClientApplication.js";
 import { OnBehalfOfRequest } from "../request/OnBehalfOfRequest.js";
 import { ClientCredentialRequest } from "../request/ClientCredentialRequest.js";
@@ -65,7 +68,7 @@ export class ConfidentialClientApplication
      */
     constructor(configuration: Configuration) {
         super(configuration);
-        this.setClientCredential(this.config);
+        this.setClientCredential();
         this.appTokenProvider = undefined;
     }
 
@@ -91,10 +94,14 @@ export class ConfidentialClientApplication
         );
 
         // If there is a client assertion present in the request, it overrides the one present in the client configuration
-        let clientAssertion;
+        let clientAssertion: ClientAssertionType | undefined;
         if (request.clientAssertion) {
             clientAssertion = {
-                assertion: request.clientAssertion,
+                assertion: await getClientAssertion(
+                    request.clientAssertion,
+                    this.config.auth.clientId
+                    // tokenEndpoint will be undefined. resourceRequestUri is omitted in ClientCredentialRequest
+                ),
                 assertionType: NodeConstants.JWT_BEARER_ASSERTION_TYPE,
             };
         }
@@ -131,8 +138,24 @@ export class ConfidentialClientApplication
             );
         }
 
+        /*
+         * if this env variable is set, and the developer provided region isn't defined and isn't "DisableMsalForceRegion",
+         * MSAL shall opt-in to ESTS-R with the value of this variable
+         */
+        const ENV_MSAL_FORCE_REGION: AzureRegion | undefined =
+            process.env[MSAL_FORCE_REGION];
+
+        let region: AzureRegion | undefined;
+        if (validRequest.azureRegion !== "DisableMsalForceRegion") {
+            if (!validRequest.azureRegion && ENV_MSAL_FORCE_REGION) {
+                region = ENV_MSAL_FORCE_REGION;
+            } else {
+                region = validRequest.azureRegion;
+            }
+        }
+
         const azureRegionConfiguration: AzureRegionConfiguration = {
-            azureRegion: validRequest.azureRegion,
+            azureRegion: region,
             environmentRegion: process.env[REGION_ENVIRONMENT_VARIABLE],
         };
 
@@ -146,6 +169,7 @@ export class ConfidentialClientApplication
                 await this.buildOauthClientConfiguration(
                     validRequest.authority,
                     validRequest.correlationId,
+                    "",
                     serverTelemetryManager,
                     azureRegionConfiguration,
                     request.azureCloudOptions
@@ -194,6 +218,7 @@ export class ConfidentialClientApplication
             const onBehalfOfConfig = await this.buildOauthClientConfiguration(
                 validRequest.authority,
                 validRequest.correlationId,
+                "",
                 undefined,
                 undefined,
                 request.azureCloudOptions
@@ -212,15 +237,13 @@ export class ConfidentialClientApplication
         }
     }
 
-    private setClientCredential(configuration: Configuration): void {
-        const clientSecretNotEmpty = !!configuration.auth.clientSecret;
-        const clientAssertionNotEmpty = !!configuration.auth.clientAssertion;
-        const certificate = configuration.auth.clientCertificate || {
-            thumbprint: Constants.EMPTY_STRING,
-            privateKey: Constants.EMPTY_STRING,
-        };
+    private setClientCredential(): void {
+        const clientSecretNotEmpty = !!this.config.auth.clientSecret;
+        const clientAssertionNotEmpty = !!this.config.auth.clientAssertion;
         const certificateNotEmpty =
-            !!certificate.thumbprint || !!certificate.privateKey;
+            (!!this.config.auth.clientCertificate?.thumbprint ||
+                !!this.config.auth.clientCertificate?.thumbprintSha256) &&
+            !!this.config.auth.clientCertificate?.privateKey;
 
         /*
          * If app developer configures this callback, they don't need a credential
@@ -241,15 +264,14 @@ export class ConfidentialClientApplication
             );
         }
 
-        if (configuration.auth.clientSecret) {
-            this.clientSecret = configuration.auth.clientSecret;
+        if (this.config.auth.clientSecret) {
+            this.clientSecret = this.config.auth.clientSecret;
             return;
         }
 
-        if (configuration.auth.clientAssertion) {
-            this.clientAssertion = ClientAssertion.fromAssertion(
-                configuration.auth.clientAssertion
-            );
+        if (this.config.auth.clientAssertion) {
+            this.developerProvidedClientAssertion =
+                this.config.auth.clientAssertion;
             return;
         }
 
@@ -258,11 +280,19 @@ export class ConfidentialClientApplication
                 ClientAuthErrorCodes.invalidClientCredential
             );
         } else {
-            this.clientAssertion = ClientAssertion.fromCertificate(
-                certificate.thumbprint,
-                certificate.privateKey,
-                configuration.auth.clientCertificate?.x5c
-            );
+            this.clientAssertion = !!this.config.auth.clientCertificate
+                .thumbprintSha256
+                ? ClientAssertion.fromCertificateWithSha256Thumbprint(
+                      this.config.auth.clientCertificate.thumbprintSha256,
+                      this.config.auth.clientCertificate.privateKey,
+                      this.config.auth.clientCertificate.x5c
+                  )
+                : ClientAssertion.fromCertificate(
+                      // guaranteed to be a string, due to prior error checking in this function
+                      this.config.auth.clientCertificate.thumbprint as string,
+                      this.config.auth.clientCertificate.privateKey,
+                      this.config.auth.clientCertificate.x5c
+                  );
         }
     }
 }

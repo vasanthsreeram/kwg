@@ -3,22 +3,9 @@
  * Licensed under the MIT License.
  */
 
-import { TokenRequest } from "./TokenRequest";
-import {
-    AccountByHomeIdRequest,
-    AccountByLocalIdRequest,
-    AccountByUsernameRequest,
-} from "./AccountRequests";
+import { TokenRequest } from "./TokenRequest.js";
 
-export type BridgeMethods =
-    | "GetToken"
-    | "GetActiveAccount"
-    | "GetAllAccounts"
-    | "GetAccountByHomeId"
-    | "GetAccountByLocalId"
-    | "GetAccountByUsername"
-    | "GetInitContext"
-    | "GetTokenPopup";
+export type BridgeMethods = "GetToken" | "GetInitContext" | "GetTokenPopup";
 
 export type BridgeRequestEnvelope = {
     messageType: "NestedAppAuthRequest";
@@ -27,11 +14,7 @@ export type BridgeRequestEnvelope = {
     clientLibrary?: string;
     clientLibraryVersion?: string;
     requestId: string;
-    body?:
-        | TokenRequest
-        | AccountByHomeIdRequest
-        | AccountByLocalIdRequest
-        | AccountByUsernameRequest;
+    tokenParams?: TokenRequest;
 };
 
 export function isBridgeRequestEnvelope(

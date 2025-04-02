@@ -13,11 +13,10 @@ import {
     IdTokenEntity,
     AccessTokenEntity,
     RefreshTokenEntity,
-    AppMetadataEntity,
     CacheManager,
     CredentialType,
     AuthenticationScheme,
-} from "@azure/msal-common";
+} from "@azure/msal-common/node";
 import {
     JsonCache,
     InMemoryCache,
@@ -29,12 +28,13 @@ import {
 } from "./SerializerTypes.js";
 
 /**
- * This class deserializes cache entities read from the file into in memory object types defined internally
+ * This class deserializes cache entities read from the file into in-memory object types defined internally
+ * @internal
  */
 export class Deserializer {
     /**
      * Parse the JSON blob in memory and deserialize the content
-     * @param cachedJson
+     * @param cachedJson - JSON blob cache
      */
     static deserializeJSONBlob(jsonFile: string): JsonCache {
         const deserializedCache = !jsonFile ? {} : JSON.parse(jsonFile);
@@ -43,7 +43,7 @@ export class Deserializer {
 
     /**
      * Deserializes accounts to AccountEntity objects
-     * @param accounts
+     * @param accounts - accounts of type SerializedAccountEntity
      */
     static deserializeAccounts(
         accounts: Record<string, SerializedAccountEntity>
@@ -80,7 +80,7 @@ export class Deserializer {
 
     /**
      * Deserializes id tokens to IdTokenEntity objects
-     * @param idTokens
+     * @param idTokens - credentials of type SerializedIdTokenEntity
      */
     static deserializeIdTokens(
         idTokens: Record<string, SerializedIdTokenEntity>
@@ -106,7 +106,7 @@ export class Deserializer {
 
     /**
      * Deserializes access tokens to AccessTokenEntity objects
-     * @param accessTokens
+     * @param accessTokens - access tokens of type SerializedAccessTokenEntity
      */
     static deserializeAccessTokens(
         accessTokens: Record<string, SerializedAccessTokenEntity>
@@ -143,7 +143,7 @@ export class Deserializer {
 
     /**
      * Deserializes refresh tokens to RefreshTokenEntity objects
-     * @param refreshTokens
+     * @param refreshTokens - refresh tokens of type SerializedRefreshTokenEntity
      */
     static deserializeRefreshTokens(
         refreshTokens: Record<string, SerializedRefreshTokenEntity>
@@ -172,7 +172,7 @@ export class Deserializer {
 
     /**
      * Deserializes appMetadata to AppMetaData objects
-     * @param appMetadata
+     * @param appMetadata - app metadata of type SerializedAppMetadataEntity
      */
     static deserializeAppMetadata(
         appMetadata: Record<string, SerializedAppMetadataEntity>
@@ -181,14 +181,11 @@ export class Deserializer {
         if (appMetadata) {
             Object.keys(appMetadata).map(function (key) {
                 const serializedAmdt = appMetadata[key];
-                const mappedAmd = {
+                appMetadataObjects[key] = {
                     clientId: serializedAmdt.client_id,
                     environment: serializedAmdt.environment,
                     familyId: serializedAmdt.family_id,
                 };
-                const amd: AppMetadataEntity = new AppMetadataEntity();
-                CacheManager.toObject(amd, mappedAmd);
-                appMetadataObjects[key] = amd;
             });
         }
 
@@ -197,7 +194,7 @@ export class Deserializer {
 
     /**
      * Deserialize an inMemory Cache
-     * @param jsonCache
+     * @param jsonCache - JSON blob cache
      */
     static deserializeAllCache(jsonCache: JsonCache): InMemoryCache {
         return {

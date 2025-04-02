@@ -3,60 +3,61 @@
  * Licensed under the MIT License.
  */
 
-import { AuthorityType } from "./AuthorityType";
+import { AuthorityType } from "./AuthorityType.js";
 import {
     isOpenIdConfigResponse,
     OpenIdConfigResponse,
-} from "./OpenIdConfigResponse";
-import { UrlString } from "../url/UrlString";
-import { IUri } from "../url/IUri";
+} from "./OpenIdConfigResponse.js";
+import { UrlString } from "../url/UrlString.js";
+import { IUri } from "../url/IUri.js";
 import {
     createClientAuthError,
     ClientAuthErrorCodes,
-} from "../error/ClientAuthError";
-import { INetworkModule } from "../network/INetworkModule";
+} from "../error/ClientAuthError.js";
+import { INetworkModule } from "../network/INetworkModule.js";
 import {
     AADAuthorityConstants,
     AuthorityMetadataSource,
     Constants,
     RegionDiscoveryOutcomes,
-} from "../utils/Constants";
+} from "../utils/Constants.js";
 import {
     EndpointMetadata,
     getCloudDiscoveryMetadataFromHardcodedValues,
     getCloudDiscoveryMetadataFromNetworkResponse,
     InstanceDiscoveryMetadataAliases,
-} from "./AuthorityMetadata";
+} from "./AuthorityMetadata.js";
 import {
     createClientConfigurationError,
     ClientConfigurationErrorCodes,
-} from "../error/ClientConfigurationError";
-import { ProtocolMode } from "./ProtocolMode";
-import { ICacheManager } from "../cache/interface/ICacheManager";
-import { AuthorityMetadataEntity } from "../cache/entities/AuthorityMetadataEntity";
+} from "../error/ClientConfigurationError.js";
+import { ProtocolMode } from "./ProtocolMode.js";
+import { ICacheManager } from "../cache/interface/ICacheManager.js";
+import { AuthorityMetadataEntity } from "../cache/entities/AuthorityMetadataEntity.js";
 import {
     AuthorityOptions,
     AzureCloudInstance,
     StaticAuthorityOptions,
-} from "./AuthorityOptions";
+} from "./AuthorityOptions.js";
 import {
     CloudInstanceDiscoveryResponse,
     isCloudInstanceDiscoveryResponse,
-} from "./CloudInstanceDiscoveryResponse";
+} from "./CloudInstanceDiscoveryResponse.js";
 import {
     CloudInstanceDiscoveryErrorResponse,
     isCloudInstanceDiscoveryErrorResponse,
-} from "./CloudInstanceDiscoveryErrorResponse";
-import { CloudDiscoveryMetadata } from "./CloudDiscoveryMetadata";
-import { RegionDiscovery } from "./RegionDiscovery";
-import { RegionDiscoveryMetadata } from "./RegionDiscoveryMetadata";
-import { ImdsOptions } from "./ImdsOptions";
-import { AzureCloudOptions } from "../config/ClientConfiguration";
-import { Logger } from "../logger/Logger";
-import { AuthError } from "../error/AuthError";
-import { IPerformanceClient } from "../telemetry/performance/IPerformanceClient";
-import { PerformanceEvents } from "../telemetry/performance/PerformanceEvent";
-import { invokeAsync } from "../utils/FunctionWrappers";
+} from "./CloudInstanceDiscoveryErrorResponse.js";
+import { CloudDiscoveryMetadata } from "./CloudDiscoveryMetadata.js";
+import { RegionDiscovery } from "./RegionDiscovery.js";
+import { RegionDiscoveryMetadata } from "./RegionDiscoveryMetadata.js";
+import { ImdsOptions } from "./ImdsOptions.js";
+import { AzureCloudOptions } from "../config/ClientConfiguration.js";
+import { Logger } from "../logger/Logger.js";
+import { AuthError } from "../error/AuthError.js";
+import { IPerformanceClient } from "../telemetry/performance/IPerformanceClient.js";
+import { PerformanceEvents } from "../telemetry/performance/PerformanceEvent.js";
+import { invokeAsync } from "../utils/FunctionWrappers.js";
+import * as CacheHelpers from "../cache/utils/CacheHelpers.js";
 
 /**
  * The authority class validates the authority URIs used by the user, and retrieves the OpenID Configuration Data from the
@@ -85,7 +86,9 @@ export class Authority {
     // Performance client
     protected performanceClient: IPerformanceClient | undefined;
     // Correlation Id
-    protected correlationId: string | undefined;
+    protected correlationId: string;
+    // Indicates if the authority is fake, for the purpose of a Managed Identity Application
+    private managedIdentity: boolean;
     // Reserved tenant domain names that will not be replaced with tenant id
     private static reservedTenantDomains: Set<string> = new Set([
         "{tenant}",
@@ -101,8 +104,9 @@ export class Authority {
         cacheManager: ICacheManager,
         authorityOptions: AuthorityOptions,
         logger: Logger,
+        correlationId: string,
         performanceClient?: IPerformanceClient,
-        correlationId?: string
+        managedIdentity?: boolean
     ) {
         this.canonicalAuthority = authority;
         this._canonicalAuthority.validateAsUri();
@@ -117,6 +121,7 @@ export class Authority {
         this.logger = logger;
         this.performanceClient = performanceClient;
         this.correlationId = correlationId;
+        this.managedIdentity = managedIdentity || false;
         this.regionDiscovery = new RegionDiscovery(
             networkInterface,
             this.logger,
@@ -382,7 +387,7 @@ export class Authority {
     }
 
     /**
-     * Boolean that returns whethr or not tenant discovery has been completed.
+     * Boolean that returns whether or not tenant discovery has been completed.
      */
     discoveryComplete(): boolean {
         return !!this.metadata;
@@ -421,6 +426,13 @@ export class Authority {
         this.updateCachedMetadata(metadataEntity, cloudDiscoverySource, {
             source: endpointSource,
         });
+        this.performanceClient?.addFields(
+            {
+                cloudDiscoverySource: cloudDiscoverySource,
+                authorityEndpointSource: endpointSource,
+            },
+            this.correlationId
+        );
     }
 
     /**
@@ -429,13 +441,24 @@ export class Authority {
      * @returns
      */
     private getCurrentMetadataEntity(): AuthorityMetadataEntity {
-        let metadataEntity = this.cacheManager.getAuthorityMetadataByAlias(
-            this.hostnameAndPort
-        );
+        let metadataEntity: AuthorityMetadataEntity | null =
+            this.cacheManager.getAuthorityMetadataByAlias(this.hostnameAndPort);
 
         if (!metadataEntity) {
-            metadataEntity = new AuthorityMetadataEntity();
-            metadataEntity.updateCanonicalAuthority(this.canonicalAuthority);
+            metadataEntity = {
+                aliases: [],
+                preferred_cache: this.hostnameAndPort,
+                preferred_network: this.hostnameAndPort,
+                canonical_authority: this.canonicalAuthority,
+                authorization_endpoint: "",
+                token_endpoint: "",
+                end_session_endpoint: "",
+                issuer: "",
+                aliasesFromNetwork: false,
+                endpointsFromNetwork: false,
+                expiresAt: CacheHelpers.generateAuthorityMetadataExpiresAt(),
+                jwks_uri: "",
+            };
         }
         return metadataEntity;
     }
@@ -460,8 +483,9 @@ export class Authority {
             endpointMetadataResult?.source !== AuthorityMetadataSource.CACHE
         ) {
             // Reset the expiration time unless both values came from a successful cache lookup
-            metadataEntity.resetExpiresAt();
-            metadataEntity.updateCanonicalAuthority(this.canonicalAuthority);
+            metadataEntity.expiresAt =
+                CacheHelpers.generateAuthorityMetadataExpiresAt();
+            metadataEntity.canonical_authority = this.canonicalAuthority;
         }
 
         const cacheKey = this.cacheManager.generateAuthorityMetadataCacheKey(
@@ -506,10 +530,13 @@ export class Authority {
                             this.performanceClient,
                             this.correlationId
                         )(localMetadata.metadata);
-                        metadataEntity.updateEndpointMetadata(
+                        CacheHelpers.updateAuthorityEndpointMetadata(
+                            metadataEntity,
                             hardcodedMetadata,
                             false
                         );
+                        metadataEntity.canonical_authority =
+                            this.canonicalAuthority;
                     }
                 }
             }
@@ -536,7 +563,11 @@ export class Authority {
                 )(metadata);
             }
 
-            metadataEntity.updateEndpointMetadata(metadata, true);
+            CacheHelpers.updateAuthorityEndpointMetadata(
+                metadataEntity,
+                metadata,
+                true
+            );
             return AuthorityMetadataSource.NETWORK;
         } else {
             // Metadata could not be obtained from the config, cache, network or hardcoded values
@@ -567,7 +598,11 @@ export class Authority {
             this.logger.verbose(
                 "Found endpoint metadata in authority configuration"
             );
-            metadataEntity.updateEndpointMetadata(configMetadata, false);
+            CacheHelpers.updateAuthorityEndpointMetadata(
+                metadataEntity,
+                configMetadata,
+                false
+            );
             return {
                 source: AuthorityMetadataSource.CONFIG,
             };
@@ -586,7 +621,11 @@ export class Authority {
             const hardcodedMetadata =
                 this.getEndpointMetadataFromHardcodedValues();
             if (hardcodedMetadata) {
-                metadataEntity.updateEndpointMetadata(hardcodedMetadata, false);
+                CacheHelpers.updateAuthorityEndpointMetadata(
+                    metadataEntity,
+                    hardcodedMetadata,
+                    false
+                );
                 return {
                     source: AuthorityMetadataSource.HARDCODED_VALUES,
                     metadata: hardcodedMetadata,
@@ -599,7 +638,8 @@ export class Authority {
         }
 
         // Check cached metadata entity expiration status
-        const metadataEntityExpired = metadataEntity.isExpired();
+        const metadataEntityExpired =
+            CacheHelpers.isAuthorityMetadataExpired(metadataEntity);
         if (
             this.isAuthoritySameType(metadataEntity) &&
             metadataEntity.endpointsFromNetwork &&
@@ -705,8 +745,8 @@ export class Authority {
      * Get OAuth endpoints for common authorities.
      */
     private getEndpointMetadataFromHardcodedValues(): OpenIdConfigResponse | null {
-        if (this.canonicalAuthority in EndpointMetadata) {
-            return EndpointMetadata[this.canonicalAuthority];
+        if (this.hostnameAndPort in EndpointMetadata) {
+            return EndpointMetadata[this.hostnameAndPort];
         }
 
         return null;
@@ -801,7 +841,11 @@ export class Authority {
         )();
 
         if (metadata) {
-            metadataEntity.updateCloudDiscoveryMetadata(metadata, true);
+            CacheHelpers.updateCloudDiscoveryMetadata(
+                metadataEntity,
+                metadata,
+                true
+            );
             return AuthorityMetadataSource.NETWORK;
         }
 
@@ -839,7 +883,11 @@ export class Authority {
             this.logger.verbose(
                 "Found cloud discovery metadata in authority configuration"
             );
-            metadataEntity.updateCloudDiscoveryMetadata(metadata, false);
+            CacheHelpers.updateCloudDiscoveryMetadata(
+                metadataEntity,
+                metadata,
+                false
+            );
             return AuthorityMetadataSource.CONFIG;
         }
 
@@ -861,7 +909,8 @@ export class Authority {
                 this.logger.verbose(
                     "Found cloud discovery metadata from hardcoded values."
                 );
-                metadataEntity.updateCloudDiscoveryMetadata(
+                CacheHelpers.updateCloudDiscoveryMetadata(
+                    metadataEntity,
                     hardcodedMetadata,
                     false
                 );
@@ -873,7 +922,8 @@ export class Authority {
             );
         }
 
-        const metadataEntityExpired = metadataEntity.isExpired();
+        const metadataEntityExpired =
+            CacheHelpers.isAuthorityMetadataExpired(metadataEntity);
         if (
             this.isAuthoritySameType(metadataEntity) &&
             metadataEntity.aliasesFromNetwork &&
@@ -1119,7 +1169,9 @@ export class Authority {
      * helper function to generate environment from authority object
      */
     getPreferredCache(): string {
-        if (this.discoveryComplete()) {
+        if (this.managedIdentity) {
+            return Constants.DEFAULT_AUTHORITY_HOST;
+        } else if (this.discoveryComplete()) {
             return this.metadata.preferred_cache;
         } else {
             throw createClientAuthError(
@@ -1266,9 +1318,11 @@ export function getTenantFromAuthorityString(
      *  AAD Authority - domain/tenantId -> Credentials are cached with realm = tenantId
      *  B2C Authority - domain/{tenantId}?/.../policy -> Credentials are cached with realm = policy
      *  tenantId is downcased because B2C policies can have mixed case but tfp claim is downcased
+     *
+     * Note that we may not have any path segments in certain OIDC scenarios.
      */
     const tenantId =
-        authorityUrlComponents.PathSegments.slice(-1)[0].toLowerCase();
+        authorityUrlComponents.PathSegments.slice(-1)[0]?.toLowerCase();
 
     switch (tenantId) {
         case AADAuthorityConstants.COMMON:

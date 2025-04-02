@@ -3,11 +3,10 @@
  * Licensed under the MIT License.
  */
 
-import { TokenRequest } from "../TokenRequest";
-import { AccountInfo as NaaAccountInfo } from "../AccountInfo";
-import { RedirectRequest } from "../../request/RedirectRequest";
-import { PopupRequest } from "../../request/PopupRequest";
-import { TokenResponse } from "../TokenResponse";
+import { TokenRequest } from "../TokenRequest.js";
+import { AccountInfo as NaaAccountInfo } from "../AccountInfo.js";
+import { RedirectRequest } from "../../request/RedirectRequest.js";
+import { PopupRequest } from "../../request/PopupRequest.js";
 import {
     AccountInfo as MsalAccountInfo,
     AuthError,
@@ -24,11 +23,20 @@ import {
     RequestParameterBuilder,
     StringUtils,
     createClientAuthError,
-} from "@azure/msal-common";
-import { isBridgeError } from "../BridgeError";
-import { BridgeStatusCode } from "../BridgeStatusCode";
-import { AuthenticationResult } from "../../response/AuthenticationResult";
-import {} from "../../error/BrowserAuthErrorCodes";
+    OIDC_DEFAULT_SCOPES,
+    AccountInfo,
+    IdTokenEntity,
+    AccessTokenEntity,
+    TenantProfile,
+    buildTenantProfile,
+} from "@azure/msal-common/browser";
+import { isBridgeError } from "../BridgeError.js";
+import { BridgeStatusCode } from "../BridgeStatusCode.js";
+import { AuthenticationResult } from "../../response/AuthenticationResult.js";
+import {} from "../../error/BrowserAuthErrorCodes.js";
+import { AuthResult } from "../AuthResult.js";
+import { SsoSilentRequest } from "../../request/SsoSilentRequest.js";
+import { SilentRequest } from "../../request/SilentRequest.js";
 
 export class NestedAppAuthAdapter {
     protected crypto: ICrypto;
@@ -49,7 +57,11 @@ export class NestedAppAuthAdapter {
     }
 
     public toNaaTokenRequest(
-        request: PopupRequest | RedirectRequest
+        request:
+            | PopupRequest
+            | RedirectRequest
+            | SilentRequest
+            | SsoSilentRequest
     ): TokenRequest {
         let extraParams: Map<string, string>;
         if (request.extraQueryParameters === undefined) {
@@ -60,21 +72,20 @@ export class NestedAppAuthAdapter {
             );
         }
 
-        const requestBuilder = new RequestParameterBuilder();
+        const correlationId =
+            request.correlationId || this.crypto.createNewGuid();
+        const requestBuilder = new RequestParameterBuilder(correlationId);
         const claims = requestBuilder.addClientCapabilitiesToClaims(
             request.claims,
             this.clientCapabilities
         );
+        const scopes = request.scopes || OIDC_DEFAULT_SCOPES;
         const tokenRequest: TokenRequest = {
-            userObjectId: request.account?.homeAccountId,
+            platformBrokerId: request.account?.homeAccountId,
             clientId: this.clientId,
             authority: request.authority,
-            scope: request.scopes.join(" "),
-            correlationId:
-                request.correlationId !== undefined
-                    ? request.correlationId
-                    : this.crypto.createNewGuid(),
-            nonce: request.nonce,
+            scope: scopes.join(" "),
+            correlationId,
             claims: !StringUtils.isEmptyObj(claims) ? claims : undefined,
             state: request.state,
             authenticationScheme:
@@ -87,35 +98,37 @@ export class NestedAppAuthAdapter {
 
     public fromNaaTokenResponse(
         request: TokenRequest,
-        response: TokenResponse,
+        response: AuthResult,
         reqTimestamp: number
     ): AuthenticationResult {
-        if (!response.id_token || !response.access_token) {
+        if (!response.token.id_token || !response.token.access_token) {
             throw createClientAuthError(ClientAuthErrorCodes.nullOrEmptyToken);
         }
 
         const expiresOn = new Date(
-            (reqTimestamp + (response.expires_in || 0)) * 1000
+            (reqTimestamp + (response.token.expires_in || 0)) * 1000
         );
         const idTokenClaims = AuthToken.extractTokenClaims(
-            response.id_token,
+            response.token.id_token,
             this.crypto.base64Decode
         );
         const account = this.fromNaaAccountInfo(
             response.account,
+            response.token.id_token,
             idTokenClaims
         );
+        const scopes = response.token.scope || request.scope;
 
         const authenticationResult: AuthenticationResult = {
-            authority: response.authority || account.environment,
+            authority: response.token.authority || account.environment,
             uniqueId: account.localAccountId,
             tenantId: account.tenantId,
-            scopes: response.scope.split(" "),
+            scopes: scopes.split(" "),
             account,
-            idToken: response.id_token !== undefined ? response.id_token : "",
+            idToken: response.token.id_token,
             idTokenClaims,
-            accessToken: response.access_token,
-            fromCache: true,
+            accessToken: response.token.access_token,
+            fromCache: false,
             expiresOn: expiresOn,
             tokenType:
                 request.authenticationScheme || AuthenticationScheme.BEARER,
@@ -151,6 +164,7 @@ export class NestedAppAuthAdapter {
      */
     public fromNaaAccountInfo(
         fromAccount: NaaAccountInfo,
+        idToken?: string,
         idTokenClaims?: TokenClaims
     ): MsalAccountInfo {
         const effectiveIdTokenClaims =
@@ -175,6 +189,16 @@ export class NestedAppAuthAdapter {
 
         const name = fromAccount.name || effectiveIdTokenClaims?.name;
 
+        const tenantProfiles = new Map<string, TenantProfile>();
+
+        const tenantProfile = buildTenantProfile(
+            homeAccountId,
+            localAccountId,
+            tenantId,
+            effectiveIdTokenClaims
+        );
+        tenantProfiles.set(tenantId, tenantProfile);
+
         const account: MsalAccountInfo = {
             homeAccountId,
             environment: fromAccount.environment,
@@ -182,8 +206,9 @@ export class NestedAppAuthAdapter {
             username,
             localAccountId,
             name,
-            idToken: fromAccount.idToken,
+            idToken: idToken,
             idTokenClaims: effectiveIdTokenClaims,
+            tenantProfiles,
         };
 
         return account;
@@ -204,32 +229,32 @@ export class NestedAppAuthAdapter {
         | InteractionRequiredAuthError {
         if (isBridgeError(error)) {
             switch (error.status) {
-                case BridgeStatusCode.USER_CANCEL:
+                case BridgeStatusCode.UserCancel:
                     return new ClientAuthError(
                         ClientAuthErrorCodes.userCanceled
                     );
-                case BridgeStatusCode.NO_NETWORK:
+                case BridgeStatusCode.NoNetwork:
                     return new ClientAuthError(
                         ClientAuthErrorCodes.noNetworkConnectivity
                     );
-                case BridgeStatusCode.ACCOUNT_UNAVAILABLE:
+                case BridgeStatusCode.AccountUnavailable:
                     return new ClientAuthError(
                         ClientAuthErrorCodes.noAccountFound
                     );
-                case BridgeStatusCode.DISABLED:
+                case BridgeStatusCode.Disabled:
                     return new ClientAuthError(
                         ClientAuthErrorCodes.nestedAppAuthBridgeDisabled
                     );
-                case BridgeStatusCode.NESTED_APP_AUTH_UNAVAILABLE:
+                case BridgeStatusCode.NestedAppAuthUnavailable:
                     return new ClientAuthError(
                         error.code ||
                             ClientAuthErrorCodes.nestedAppAuthBridgeDisabled,
                         error.description
                     );
-                case BridgeStatusCode.TRANSIENT_ERROR:
-                case BridgeStatusCode.PERSISTENT_ERROR:
+                case BridgeStatusCode.TransientError:
+                case BridgeStatusCode.PersistentError:
                     return new ServerError(error.code, error.description);
-                case BridgeStatusCode.USER_INTERACTION_REQUIRED:
+                case BridgeStatusCode.UserInteractionRequired:
                     return new InteractionRequiredAuthError(
                         error.code,
                         error.description
@@ -240,5 +265,55 @@ export class NestedAppAuthAdapter {
         } else {
             return new AuthError("unknown_error", "An unknown error occurred");
         }
+    }
+
+    /**
+     * Returns an AuthenticationResult from the given cache items
+     *
+     * @param account
+     * @param idToken
+     * @param accessToken
+     * @param reqTimestamp
+     * @returns
+     */
+    public toAuthenticationResultFromCache(
+        account: AccountInfo,
+        idToken: IdTokenEntity,
+        accessToken: AccessTokenEntity,
+        request: SilentRequest,
+        correlationId: string
+    ): AuthenticationResult {
+        if (!idToken || !accessToken) {
+            throw createClientAuthError(ClientAuthErrorCodes.nullOrEmptyToken);
+        }
+
+        const idTokenClaims = AuthToken.extractTokenClaims(
+            idToken.secret,
+            this.crypto.base64Decode
+        );
+
+        const scopes = accessToken.target || request.scopes.join(" ");
+
+        const authenticationResult: AuthenticationResult = {
+            authority: accessToken.environment || account.environment,
+            uniqueId: account.localAccountId,
+            tenantId: account.tenantId,
+            scopes: scopes.split(" "),
+            account,
+            idToken: idToken.secret,
+            idTokenClaims: idTokenClaims || {},
+            accessToken: accessToken.secret,
+            fromCache: true,
+            expiresOn: new Date(Number(accessToken.expiresOn) * 1000),
+            tokenType:
+                request.authenticationScheme || AuthenticationScheme.BEARER,
+            correlationId,
+            extExpiresOn: new Date(
+                Number(accessToken.extendedExpiresOn) * 1000
+            ),
+            state: request.state,
+        };
+
+        return authenticationResult;
     }
 }

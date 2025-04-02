@@ -3,26 +3,27 @@
  * Licensed under the MIT License.
  */
 
-import { BaseClient } from "./BaseClient";
-import { ClientConfiguration } from "../config/ClientConfiguration";
-import { CommonSilentFlowRequest } from "../request/CommonSilentFlowRequest";
-import { AuthenticationResult } from "../response/AuthenticationResult";
-import { TimeUtils } from "../utils/TimeUtils";
-import { RefreshTokenClient } from "./RefreshTokenClient";
+import { BaseClient } from "./BaseClient.js";
+import { ClientConfiguration } from "../config/ClientConfiguration.js";
+import { CommonSilentFlowRequest } from "../request/CommonSilentFlowRequest.js";
+import { AuthenticationResult } from "../response/AuthenticationResult.js";
+import * as TimeUtils from "../utils/TimeUtils.js";
+import { RefreshTokenClient } from "./RefreshTokenClient.js";
 import {
     ClientAuthError,
     ClientAuthErrorCodes,
     createClientAuthError,
-} from "../error/ClientAuthError";
-import { ResponseHandler } from "../response/ResponseHandler";
-import { CacheRecord } from "../cache/entities/CacheRecord";
-import { CacheOutcome } from "../utils/Constants";
-import { IPerformanceClient } from "../telemetry/performance/IPerformanceClient";
-import { StringUtils } from "../utils/StringUtils";
-import { checkMaxAge, extractTokenClaims } from "../account/AuthToken";
-import { TokenClaims } from "../account/TokenClaims";
-import { PerformanceEvents } from "../telemetry/performance/PerformanceEvent";
-import { invokeAsync } from "../utils/FunctionWrappers";
+} from "../error/ClientAuthError.js";
+import { ResponseHandler } from "../response/ResponseHandler.js";
+import { CacheRecord } from "../cache/entities/CacheRecord.js";
+import { CacheOutcome, OIDC_DEFAULT_SCOPES } from "../utils/Constants.js";
+import { IPerformanceClient } from "../telemetry/performance/IPerformanceClient.js";
+import { StringUtils } from "../utils/StringUtils.js";
+import { checkMaxAge, extractTokenClaims } from "../account/AuthToken.js";
+import { TokenClaims } from "../account/TokenClaims.js";
+import { PerformanceEvents } from "../telemetry/performance/PerformanceEvent.js";
+import { invokeAsync } from "../utils/FunctionWrappers.js";
+import { getTenantFromAuthorityString } from "../authority/Authority.js";
 
 /** @internal */
 export class SilentFlowClient extends BaseClient {
@@ -42,9 +43,12 @@ export class SilentFlowClient extends BaseClient {
         request: CommonSilentFlowRequest
     ): Promise<AuthenticationResult> {
         try {
-            const [authResponse, cacheOutcome] = await this.acquireCachedToken(
-                request
-            );
+            const [authResponse, cacheOutcome] = await this.acquireCachedToken({
+                ...request,
+                scopes: request.scopes?.length
+                    ? request.scopes
+                    : [...OIDC_DEFAULT_SCOPES],
+            });
 
             // if the token is not expired but must be refreshed; get a new one in the background
             if (cacheOutcome === CacheOutcome.PROACTIVELY_REFRESHED) {
@@ -118,18 +122,20 @@ export class SilentFlowClient extends BaseClient {
             );
         }
 
-        const environment =
-            request.authority || this.authority.getPreferredCache();
-
-        const cacheRecord = this.cacheManager.readCacheRecord(
+        const requestTenantId =
+            request.account.tenantId ||
+            getTenantFromAuthorityString(request.authority);
+        const tokenKeys = this.cacheManager.getTokenKeys();
+        const cachedAccessToken = this.cacheManager.getAccessToken(
             request.account,
             request,
-            environment,
+            tokenKeys,
+            requestTenantId,
             this.performanceClient,
             request.correlationId
         );
 
-        if (!cacheRecord.accessToken) {
+        if (!cachedAccessToken) {
             // must refresh due to non-existent access_token
             this.setCacheOutcome(
                 CacheOutcome.NO_CACHED_ACCESS_TOKEN,
@@ -139,9 +145,9 @@ export class SilentFlowClient extends BaseClient {
                 ClientAuthErrorCodes.tokenRefreshRequired
             );
         } else if (
-            TimeUtils.wasClockTurnedBack(cacheRecord.accessToken.cachedAt) ||
+            TimeUtils.wasClockTurnedBack(cachedAccessToken.cachedAt) ||
             TimeUtils.isTokenExpired(
-                cacheRecord.accessToken.expiresOn,
+                cachedAccessToken.expiresOn,
                 this.config.systemOptions.tokenRenewalOffsetSeconds
             )
         ) {
@@ -154,14 +160,31 @@ export class SilentFlowClient extends BaseClient {
                 ClientAuthErrorCodes.tokenRefreshRequired
             );
         } else if (
-            cacheRecord.accessToken.refreshOn &&
-            TimeUtils.isTokenExpired(cacheRecord.accessToken.refreshOn, 0)
+            cachedAccessToken.refreshOn &&
+            TimeUtils.isTokenExpired(cachedAccessToken.refreshOn, 0)
         ) {
             // must refresh (in the background) due to the refresh_in value
             lastCacheOutcome = CacheOutcome.PROACTIVELY_REFRESHED;
 
             // don't throw ClientAuthError.createRefreshRequiredError(), return cached token instead
         }
+
+        const environment =
+            request.authority || this.authority.getPreferredCache();
+        const cacheRecord: CacheRecord = {
+            account: this.cacheManager.readAccountFromCache(request.account),
+            accessToken: cachedAccessToken,
+            idToken: this.cacheManager.getIdToken(
+                request.account,
+                tokenKeys,
+                requestTenantId,
+                this.performanceClient,
+                request.correlationId
+            ),
+            refreshToken: null,
+            appMetadata:
+                this.cacheManager.readAppMetadataFromCache(environment),
+        };
 
         this.setCacheOutcome(lastCacheOutcome, request.correlationId);
 

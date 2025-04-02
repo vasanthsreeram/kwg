@@ -7,8 +7,8 @@ import {
     AccountInfo,
     CommonSilentFlowRequest,
     StringDict,
-} from "@azure/msal-common";
-import { CacheLookupPolicy } from "../utils/BrowserConstants";
+} from "@azure/msal-common/browser";
+import { CacheLookupPolicy } from "../utils/BrowserConstants.js";
 
 /**
  * SilentRequest: Request object passed by user to retrieve tokens from the
@@ -45,5 +45,6 @@ export type SilentRequest = Omit<
     forceRefresh?: boolean;
     cacheLookupPolicy?: CacheLookupPolicy;
     prompt?: string;
+    state?: string;
     tokenBodyParameters?: StringDict;
 };

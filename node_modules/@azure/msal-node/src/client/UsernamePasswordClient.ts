@@ -8,6 +8,7 @@ import {
     Authority,
     BaseClient,
     CcsCredentialType,
+    ClientAssertion,
     ClientConfiguration,
     CommonUsernamePasswordRequest,
     GrantType,
@@ -19,11 +20,13 @@ import {
     StringUtils,
     TimeUtils,
     UrlString,
-} from "@azure/msal-common";
+    getClientAssertion,
+} from "@azure/msal-common/node";
 
 /**
  * Oauth2.0 Password grant client
  * Note: We are only supporting public clients for password grant and for purely testing purposes
+ * @public
  */
 export class UsernamePasswordClient extends BaseClient {
     constructor(configuration: ClientConfiguration) {
@@ -33,7 +36,7 @@ export class UsernamePasswordClient extends BaseClient {
     /**
      * API to acquire a token by passing the username and password to the service in exchage of credentials
      * password_grant
-     * @param request
+     * @param request - CommonUsernamePasswordRequest
      */
     async acquireToken(
         request: CommonUsernamePasswordRequest
@@ -69,8 +72,8 @@ export class UsernamePasswordClient extends BaseClient {
 
     /**
      * Executes POST request to token endpoint
-     * @param authority
-     * @param request
+     * @param authority - authority object
+     * @param request - CommonUsernamePasswordRequest provided by the developer
      */
     private async executeTokenRequest(
         authority: Authority,
@@ -81,7 +84,7 @@ export class UsernamePasswordClient extends BaseClient {
             authority.tokenEndpoint,
             queryParametersString
         );
-        const requestBody = this.createTokenRequestBody(request);
+        const requestBody = await this.createTokenRequestBody(request);
         const headers: Record<string, string> = this.createTokenRequestHeaders({
             credential: request.username,
             type: CcsCredentialType.UPN,
@@ -109,11 +112,11 @@ export class UsernamePasswordClient extends BaseClient {
 
     /**
      * Generates a map for all the params to be sent to the service
-     * @param request
+     * @param request - CommonUsernamePasswordRequest provided by the developer
      */
-    private createTokenRequestBody(
+    private async createTokenRequestBody(
         request: CommonUsernamePasswordRequest
-    ): string {
+    ): Promise<string> {
         const parameterBuilder = new RequestParameterBuilder();
 
         parameterBuilder.addClientId(this.config.authOptions.clientId);
@@ -148,10 +151,17 @@ export class UsernamePasswordClient extends BaseClient {
             );
         }
 
-        if (this.config.clientCredentials.clientAssertion) {
-            const clientAssertion =
-                this.config.clientCredentials.clientAssertion;
-            parameterBuilder.addClientAssertion(clientAssertion.assertion);
+        const clientAssertion: ClientAssertion | undefined =
+            this.config.clientCredentials.clientAssertion;
+
+        if (clientAssertion) {
+            parameterBuilder.addClientAssertion(
+                await getClientAssertion(
+                    clientAssertion.assertion,
+                    this.config.authOptions.clientId,
+                    request.resourceRequestUri
+                )
+            );
             parameterBuilder.addClientAssertionType(
                 clientAssertion.assertionType
             );
