@@ -2,8 +2,8 @@ const express = require('express');
 const path = require('path');
 const app = express(); 
 const bodyParser = require('body-parser');
-require('dotenv').config();
-const sql = require('mssql');
+const sqlite3 = require('sqlite3').verbose();
+const createCsvStringifier = require('csv-writer').createObjectCsvStringifier;
 // var test = "bro";
 const port = process.env.PORT || 3000;
 
@@ -14,17 +14,39 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-const dbConfig = {
-  user: process.env.DB_USER,
-  password: process.env.PASSWORD,
-  server: process.env.SERVER,
-  database: process.env.DB_DATABASE,
-  port: 1433,
-  options: {
-      encrypt: true, // Necessary for Azure SQL
-      trustServerCertificate: false // Change to true if on a local environment
+// Initialize SQLite Database
+const dbPath = '/tmp/database.sqlite'; // Use /tmp directory inside container
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) {
+    console.error('Error opening database', err.message);
+  } else {
+    console.log('Connected to the SQLite database.');
+    // Create table if it doesn't exist
+    db.run(`CREATE TABLE IF NOT EXISTS GridGame (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      UID INTEGER,
+      Duration REAL,
+      Date TEXT,
+      Condition INTEGER,
+      Scale TEXT,
+      EnvOrder TEXT,
+      tscollect TEXT,
+      xcollect TEXT,
+      ycollect TEXT,
+      zcollect TEXT,
+      zcollectScaled TEXT,
+      BonusLevel TEXT,
+      StarArray TEXT,
+      TesterNotes TEXT
+    )`, (err) => {
+      if (err) {
+        console.error('Error creating table', err.message);
+      } else {
+        console.log('GridGame table ready.');
+      }
+    });
   }
-}
+});
 
 // Start the server
 app.listen(port, () => {
@@ -42,71 +64,139 @@ app.get('/rg', (req, res) => {
 });
 
 // Add API endpoint for stats
-app.get('/api/get-stats', async (req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query('SELECT COUNT(*) AS records FROM GridGame');
-    res.json({ records: result.recordset[0].records });
-  } catch (error) {
-    console.error('Error fetching stats:', error);
-    res.status(500).json({ error: 'Failed to fetch stats' });
-  }
+app.get('/api/get-stats', (req, res) => {
+  db.get('SELECT COUNT(*) AS records FROM GridGame', [], (err, row) => {
+    if (err) {
+      console.error('Error fetching stats:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+    res.json({ records: row ? row.records : 0 });
+  });
 });
 
 // Add API endpoint for debug data
-app.get('/api/debug-data', async (req, res) => {
-  try {
-    const pool = await sql.connect(dbConfig);
-    const result = await pool.request().query('SELECT * FROM GridGame');
-    res.json(result.recordset);
-  } catch (error) {
-    console.error('Error fetching debug data:', error);
-    res.status(500).json({ error: 'Failed to fetch debug data' });
-  }
+app.get('/api/debug-data', (req, res) => {
+  db.all('SELECT * FROM GridGame ORDER BY Date DESC', [], (err, rows) => {
+    if (err) {
+      console.error('Error fetching debug data:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch debug data' });
+    }
+    res.json(rows);
+  });
 });
 
-app.post('/submit-data', async (req, res) => {
+app.post('/submit-data', (req, res) => {
   const data = req.body;
-  console.log("data is here", data);
-  
-  try {
-    console.log("dbconfig", dbConfig);
-    
-    try {
-      const pool = await sql.connect(dbConfig);
-      const query = `INSERT INTO GridGame (UID, Duration, Date, Condition, Scale, EnvOrder, tscollect, xcollect, ycollect, zcollect, zcollectScaled, BonusLevel, StarArray, TesterNotes) 
-      VALUES (@uid, @duration, @date, @condition, @scale, @envOrder, @tscollect, @xcollect, @ycollect, @zcollect, @zcollectScaled, @bonusLevel, @starArray, @testerNotes)`;
-      data.date = new Date();
-      
-      console.log(data.uid, "data exists");
-      await pool.request()
-        .input('uid', sql.Int, data.uid)
-        .input('duration', sql.Float, data.duration)
-        .input('date', sql.DateTime, new Date(data.date))
-        .input('condition', sql.Int, data.condition)
-        .input('scale', sql.NVarChar(sql.MAX), JSON.stringify(data.scale))
-        .input('envOrder', sql.NVarChar(sql.MAX), JSON.stringify(data.envOrder))
-        .input('tscollect', sql.NVarChar(sql.MAX), JSON.stringify(data.tscollect))
-        .input('xcollect', sql.NVarChar(sql.MAX), JSON.stringify(data.xcollect))
-        .input('ycollect', sql.NVarChar(sql.MAX), JSON.stringify(data.ycollect))
-        .input('zcollect', sql.NVarChar(sql.MAX), JSON.stringify(data.zcollect))
-        .input('zcollectScaled', sql.NVarChar(sql.MAX), JSON.stringify(data.zcollectScaled))
-        .input('bonusLevel', sql.NVarChar(sql.MAX), JSON.stringify(data.bonusLevel))
-        .input('starArray', sql.NVarChar(sql.MAX), JSON.stringify(data.starArray))
-        .input('testerNotes', sql.NVarChar(sql.MAX), JSON.stringify(data.testerNotes))
-        .query(query);
-      
-      console.log('Inserted final data in DB');
-      // document.getElementById is not available in Node.js - this code was likely mistakenly copied from client-side code
-    } catch (error) {
-      console.log("dbconfig", dbConfig);
-      console.log('Error saving data to DB:', error);
+  console.log("Received data:", data);
+
+  const query = `INSERT INTO GridGame (
+    UID, Duration, Date, Condition, Scale, EnvOrder, tscollect, xcollect, ycollect, zcollect, zcollectScaled, BonusLevel, StarArray, TesterNotes
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+  const params = [
+    data.uid,
+    data.duration,
+    new Date().toISOString(), // Store date as ISO string
+    data.condition,
+    JSON.stringify(data.scale),
+    JSON.stringify(data.envOrder),
+    JSON.stringify(data.tscollect),
+    JSON.stringify(data.xcollect),
+    JSON.stringify(data.ycollect),
+    JSON.stringify(data.zcollect),
+    JSON.stringify(data.zcollectScaled),
+    JSON.stringify(data.bonusLevel),
+    JSON.stringify(data.starArray),
+    JSON.stringify(data.testerNotes)
+  ];
+
+  db.run(query, params, function(err) { // Use function() to access 'this'
+    if (err) {
+      console.error('Error saving data to DB:', err.message);
       return res.status(500).send({ status: 'Error saving data to database' });
     }
-  } catch (error) {
-    console.log("dbconfig", dbConfig);
-    return res.status(500).send({ status: 'Error processing request' });
-  }
+    console.log(`Inserted final data in DB with rowid ${this.lastID}`);
+  });
+  // Response is sent inside the db.run callback
   
-  res.send({ status: 'Data successfully saved' });
-});
+  // Response is sent inside the db.run callback
+  });
+  
+  // Add endpoint for CSV data export
+  app.get('/admin-out', (req, res) => {
+    db.all('SELECT * FROM GridGame ORDER BY Date DESC', [], (err, rows) => {
+      if (err) {
+        console.error('Error fetching data for CSV:', err.message);
+        return res.status(500).json({ error: 'Failed to fetch data' });
+      }
+  
+      if (!rows || rows.length === 0) {
+        return res.status(200).send('No data available');
+      }
+  
+      // Dynamically build headers and process rows
+      const headersSet = new Set();
+      const processedRows = [];
+  
+      rows.forEach(row => {
+        const flatRow = {};
+        for (const key in row) {
+          let value = row[key];
+          try {
+            const parsed = JSON.parse(value);
+            // Attempt to flatten arrays and simple objects
+            if (Array.isArray(parsed)) {
+               // Limit flattening for arrays to avoid excessive columns
+              const maxFlatten = 10;
+              parsed.slice(0, maxFlatten).forEach((item, idx) => {
+                const colName = `${key}_${idx}`;
+                flatRow[colName] = typeof item === 'object' ? JSON.stringify(item) : item;
+                headersSet.add(colName);
+              });
+               if (parsed.length > maxFlatten) {
+                   const colName = `${key}_extra`;
+                   flatRow[colName] = JSON.stringify(parsed.slice(maxFlatten));
+                   headersSet.add(colName);
+               }
+            } else if (parsed && typeof parsed === 'object' && Object.keys(parsed).length < 15) { // Limit object flattening
+              for (const subKey in parsed) {
+                const colName = `${key}_${subKey}`;
+                flatRow[colName] = typeof parsed[subKey] === 'object' ? JSON.stringify(parsed[subKey]) : parsed[subKey];
+                headersSet.add(colName);
+              }
+            } else {
+               // Keep original value if not simple array/object or if parsing failed initially
+               flatRow[key] = value; // Use original value
+               headersSet.add(key);
+            }
+          } catch {
+            // Not JSON or complex structure, keep as is
+            flatRow[key] = value;
+            headersSet.add(key);
+          }
+        }
+        processedRows.push(flatRow);
+      });
+  
+      // Ensure consistent column order (optional but recommended)
+      const baseColumns = ['id', 'UID', 'Duration', 'Date', 'Condition']; // Add other non-JSON base columns
+      const sortedHeaders = Array.from(headersSet).sort((a, b) => {
+          const aBase = baseColumns.includes(a);
+          const bBase = baseColumns.includes(b);
+          if (aBase && !bBase) return -1;
+          if (!aBase && bBase) return 1;
+          return a.localeCompare(b); // Alphabetical for others
+      });
+  
+      const headers = sortedHeaders.map(h => ({ id: h, title: h }));
+  
+      const csvStringifier = createCsvStringifier({ header: headers });
+  
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="gridgame_data.csv"');
+  
+      res.write(csvStringifier.getHeaderString());
+      res.write(csvStringifier.stringifyRecords(processedRows));
+      res.end();
+    });
+  });

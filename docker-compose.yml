@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  gridgame:
+    build: .
+    container_name: gridgame_app
+    ports:
+      - "3000:3000"
+    # No volumes mounted for now to ensure container uses its own filesystem
+    environment:
+      - NODE_ENV=production
+    command: npm start
